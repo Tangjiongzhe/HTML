@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>飞机大战</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        #gameCanvas {
+            border: 1px solid #333;
+            background: #111;
+            width: 500px;
+            height: 600px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+<canvas id="gameCanvas" width="500" height="600"></canvas>
+
+<script>
+// ====================== 游戏常量 ======================
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const WIDTH = canvas.width;
+const HEIGHT = canvas.height;
+const FPS = 60;
+const FRAME_INTERVAL = 1000 / FPS;
+let lastTime = 0;
+
+// 游戏平衡参数
+const MAX_ROCKS = 8;
+const PLAYER_SPEED = 7;
+const BULLET_WIDTH = 10;
+const BULLET_HEIGHT = 20;
+const BULLET_SPEED = 8;
+const EXPLOSION_SPEED = 0.3;
+const MAX_HEALTH = 100;
+const INITIAL_LIVES = 3;
+const HIDE_DURATION = 2000;
+const BACKGROUND_VOLUME = 0.5;
+const PROP_SPEED = 3;
+const DUAL_GUN_DURATION = 5000;
+
+// 得分规则（陨石类型0-6对应得分）
+const SCORE_PER_ROCK = [100, 80, 60, 40, 30, 20, 10];
+
+// ====================== 资源加载（图片+音频） ======================
+// 背景/飞机/陨石/子弹图片（需替换为你的资源路径）
+const backgroundImg = new Image();
+backgroundImg.src = 'img/background.png';
+
+const playerImg = new Image();
+playerImg.src = 'img/player.png';
+
+const rockImgs = Array.from({ length: 7 }, (_, i) => {
+    const img = new Image();
+    img.src = `img/rock${i}.png`;
+    return img;
+});
+
+const bulletImg = new Image();
+bulletImg.src = 'img/bullet.png';
+
+// 爆炸图片
+const explImgs = Array.from({ length: 9 }, (_, i) => {
+    const img = new Image();
+    img.src = `img/expl${i}.png`;
+    return img;
+});
+
+const playerExplImgs = Array.from({ length: 9 }, (_, i) => {
+    const img = new Image();
+    img.src = `img/player_expl${i}.png`;
+    return img;
+});
+
+// 道具图片
+const gunImg = new Image();
+gunImg.src = 'img/gun.png';
+
+const shieldImg = new Image();
+shieldImg.src = 'img/shield.png';
+
+// 音频资源（需替换为你的资源路径）
+const backgroundAudio = new Audio('sound/background.ogg');
+backgroundAudio.loop = true;
+backgroundAudio.volume = BACKGROUND_VOLUME;
+
+const shootAudio = new Audio('sound/shoot.wav');
+shootAudio.volume = 0.5;
+
+const explAudios = [
+    new Audio('sound/expl0.wav'),
+    new Audio('sound/expl1.wav')
+];
+explAudios.forEach(audio => audio.volume = 0.7);
+
+const powAudios = [
+    new Audio('sound/pow0.wav'),
+    new Audio('sound/pow1.wav')
+];
+powAudios.forEach(audio => audio.volume = 0.6);
+
+const rumbleAudio = new Audio('sound/rumble.ogg');
+rumbleAudio.volume = 0.8;
+
+// ====================== 游戏状态管理 ======================
+let currentHealth = MAX_HEALTH;
+let currentLives = INITIAL_LIVES;
+let isPlayerHidden = false;
+let isGameStarted = false;
+let isGameOver = false;
+let isDualGun = false;
+let score = 0;
+
+// ====================== 游戏对象定义 ======================
+const player = {
+    x: WIDTH / 2 - 25,
+    y: HEIGHT - 70,
+    width: 50,
+    height: 50,
+    speed: PLAYER_SPEED,
+    get center() { return { x: this.x + this.width/2, y: this.y + this.height/2 }; },
+    get radius() { return Math.min(this.width, this.height)/2; }
+};
+
+let rocks = [];
+let bullets = [];
+let explosions = [];
+let props = [];
+
+const keys = { ArrowLeft: false, ArrowRight: false, Space: false };
+
+// ====================== 工具函数 ======================
+function getRandomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// ====================== 游戏逻辑函数 ======================
+function createRock() {
+    const type = getRandomInt(0, 6);
+    const img = rockImgs[type];
+    return {
+        x: getRandomInt(0, WIDTH - img.naturalWidth),
+        y: getRandomInt(-100, -img.naturalHeight),
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+        speedX: getRandomInt(-3, 3),
+        speedY: getRandomInt(2, 10),
+        angle: 0,
+        angleInc: getRandomInt(1, 3),
+        img: img,
+        type: type,
+        get center() { return { x: this.x + this.width/2, y: this.y + this.height/2 }; },
+        get radius() { return Math.min(this.width, this.height)/2; }
+    };
+}
+
+function initRocks() {
+    rocks = Array.from({ length: MAX_ROCKS }, () => createRock());
+}
+
+function shootBullet() {
+    if (!isGameStarted || isGameOver) return;
+    const bulletPos = isDualGun ? [
+        { x: player.x + player.width/4 - BULLET_WIDTH/2, y: player.y },
+        { x: player.x + 3*player.width/4 - BULLET_WIDTH/2, y: player.y }
+    ] : [
+        { x: player.x + player.width/2 - BULLET_WIDTH/2, y: player.y }
+    ];
+    bulletPos.forEach(pos => {
+        bullets.push({
+            x: pos.x, y: pos.y,
+            width: BULLET_WIDTH, height: BULLET_HEIGHT,
+            speedY: BULLET_SPEED,
+            get center() { return { x: this.x + this.width/2, y: this.y + this.height/2 }; },
+            get radius() { return Math.min(this.width, this.height)/2; }
+        });
+    });
+    shootAudio.cloneNode().play().catch(err => console.error('射击音效失败:', err));
+}
+
+function updatePlayer() {
+    if (isPlayerHidden || isGameOver || !isGameStarted) return;
+    if (keys.ArrowLeft && player.x > 0) player.x -= player.speed;
+    if (keys.ArrowRight && player.x < WIDTH - player.width) player.x += player.speed;
+}
+
+function updateRocks() {
+    if (!isGameStarted) return;
+    for (let i = rocks.length - 1; i >= 0; i--) {
+        const rock = rocks[i];
+        rock.x += rock.speedX;
+        rock.y += rock.speedY;
+        rock.angle += rock.angleInc;
+        if (rock.y + rock.height > HEIGHT || rock.x + rock.width < 0 || rock.x > WIDTH) {
+            rocks.splice(i, 1);
+            rocks.push(createRock());
+        }
+    }
+}
+
+function updateBullets() {
+    if (!isGameStarted) return;
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        const bullet = bullets[i];
+        bullet.y -= bullet.speedY;
+        if (bullet.y + bullet.height <= 0) bullets.splice(i, 1);
+    }
+}
+
+function updateExplosions() {
+    if (!isGameStarted) return;
+    for (let i = explosions.length - 1; i >= 0; i--) {
+        const explosion = explosions[i];
+        explosion.frame += EXPLOSION_SPEED;
+        if (Math.floor(explosion.frame) > explosion.maxFrame) explosions.splice(i, 1);
+    }
+}
+
+function updateProps() {
+    if (!isGameStarted) return;
+    for (let i = props.length - 1; i >= 0; i--) {
+        const prop = props[i];
+        prop.y += PROP_SPEED;
+        if (prop.y > HEIGHT) props.splice(i, 1);
+    }
+}
+
+function checkBulletRockCollision() {
+    if (!isGameStarted) return;
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        const bullet = bullets[i];
+        for (let j = rocks.length - 1; j >= 0; j--) {
+            const rock = rocks[j];
+            const dx = bullet.center.x - rock.center.x;
+            const dy = bullet.center.y - rock.center.y;
+            if (Math.sqrt(dx*dx + dy*dy) <= bullet.radius + rock.radius) {
+                score += SCORE_PER_ROCK[rock.type];
+                if (Math.random() < 0.2) {
+                    const propType = Math.random() < 0.5 ? 'GUN' : 'SHIELD';
+                    const propImg = propType === 'GUN' ? gunImg : shieldImg;
+                    props.push({
+                        x: rock.center.x - propImg.naturalWidth/2,
+                        y: rock.center.y,
+                        width: propImg.naturalWidth,
+                        height: propImg.naturalHeight,
+                        type: propType,
+                        img: propImg
+                    });
+                }
+                explAudios[getRandomInt(0, 1)].cloneNode().play().catch(err => console.error('爆炸音效失败:', err));
+                explosions.push({
+                    x: rock.center.x, y: rock.center.y,
+                    width: explImgs[0].naturalWidth * 0.7,
+                    height: explImgs[0].naturalHeight * 0.7,
+                    frame: 0,
+                    maxFrame: explImgs.length - 1,
+                    imgArray: explImgs
+                });
+                bullets.splice(i, 1);
+                rocks.splice(j, 1);
+                rocks.push(createRock());
+                break;
+            }
+        }
+    }
+}
+
+function checkRockPlayerCollision() {
+    if (isPlayerHidden || isGameOver || !isGameStarted) return;
+    for (let i = rocks.length - 1; i >= 0; i--) {
+        const rock = rocks[i];
+        const dx = player.center.x - rock.center.x;
+        const dy = player.center.y - rock.center.y;
+        if (Math.sqrt(dx*dx + dy*dy) <= player.radius + rock.radius) {
+            const damage = Math.floor(rock.radius * 2 * 0.5);
+            currentHealth = Math.max(currentHealth - damage, 0);
+            if (currentHealth > 0) {
+                explosions.push({
+                    x: player.center.x, y: player.center.y,
+                    width: explImgs[0].naturalWidth * 0.2,
+                    height: explImgs[0].naturalHeight * 0.2,
+                    frame: 0,
+                    maxFrame: explImgs.length - 1,
+                    imgArray: explImgs
+                });
+            }
+            rocks.splice(i, 1);
+            rocks.push(createRock());
+            if (currentHealth === 0) handlePlayerDeath();
+            break;
+        }
+    }
+}
+
+function checkPlayerPropCollision() {
+    if (isPlayerHidden || isGameOver || !isGameStarted) return;
+    for (let i = props.length - 1; i >= 0; i--) {
+        const prop = props[i];
+        if (
+            player.x < prop.x + prop.width &&
+            player.x + player.width > prop.x &&
+            player.y < prop.y + prop.height &&
+            player.y + player.height > prop.y
+        ) {
+            powAudios[getRandomInt(0, 1)].cloneNode().play().catch(err => console.error('道具音效失败:', err));
+            switch (prop.type) {
+                case 'GUN':
+                    isDualGun = true;
+                    setTimeout(() => isDualGun = false, DUAL_GUN_DURATION);
+                    break;
+                case 'SHIELD':
+                    currentHealth = MAX_HEALTH;
+                    break;
+            }
+            props.splice(i, 1);
+        }
+    }
+}
+
+function handlePlayerDeath() {
+    explosions.push({
+        x: player.center.x, y: player.center.y,
+        width: playerExplImgs[0].naturalWidth * 0.7,
+        height: playerExplImgs[0].naturalHeight * 0.7,
+        frame: 0,
+        maxFrame: playerExplImgs.length - 1,
+        imgArray: playerExplImgs
+    });
+    currentLives--;
+    rumbleAudio.cloneNode().play().catch(err => console.error('震动音效失败:', err));
+    if (currentLives > 0) {
+        isPlayerHidden = true;
+        player.y = HEIGHT + 100;
+        setTimeout(() => {
+            isPlayerHidden = false;
+            currentHealth = MAX_HEALTH;
+            player.x = WIDTH / 2 - player.width/2;
+            player.y = HEIGHT - player.height - 10;
+        }, HIDE_DURATION);
+    } else {
+        isGameOver = true;
+        gameOver();
+    }
+}
+
+function gameOver() {
+    cancelAnimationFrame(gameLoop);
+    ctx.fillStyle = '#fff';
+    ctx.font = '48px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Game Over', WIDTH / 2, HEIGHT / 2);
+    backgroundAudio.pause();
+}
+
+// ====================== 绘制函数 ======================
+function drawBackground() {
+    ctx.drawImage(backgroundImg, 0, 0, WIDTH, HEIGHT);
+}
+
+function drawPlayer() {
+    if (isPlayerHidden || isGameOver || !isGameStarted) return;
+    ctx.drawImage(playerImg, player.x, player.y, player.width, player.height);
+}
+
+function drawRocks() {
+    if (!isGameStarted) return;
+    rocks.forEach(rock => {
+        ctx.save();
+        ctx.translate(rock.center.x, rock.center.y);
+        ctx.rotate(rock.angle * Math.PI / 180);
+        ctx.drawImage(rock.img, -rock.width/2, -rock.height/2, rock.width, rock.height);
+        ctx.restore();
+    });
+}
+
+function drawBullets() {
+    if (!isGameStarted) return;
+    bullets.forEach(bullet => {
+        ctx.drawImage(bulletImg, bullet.x, bullet.y, bullet.width, bullet.height);
+    });
+}
+
+function drawExplosions() {
+    if (!isGameStarted) return;
+    explosions.forEach(explosion => {
+        const frame = Math.floor(explosion.frame);
+        const img = explosion.imgArray[frame];
+        ctx.drawImage(img, explosion.x - explosion.width/2, explosion.y - explosion.height/2, explosion.width, explosion.height);
+    });
+}
+
+function drawProps() {
+    if (!isGameStarted) return;
+    props.forEach(prop => {
+        ctx.drawImage(prop.img, prop.x, prop.y, prop.width, prop.height);
+    });
+}
+
+function drawHealthBar() {
+    if (!isGameStarted) return;
+    const barWidth = 150;
+    const barHeight = 15;
+    const healthPercent = currentHealth / MAX_HEALTH;
+    ctx.fillStyle = '#666';
+    ctx.fillRect(10, 10, barWidth, barHeight);
+    ctx.fillStyle = '#0f0';
+    ctx.fillRect(10, 10, barWidth * healthPercent, barHeight);
+    ctx.strokeStyle = '#fff';
+    ctx.strokeRect(10, 10, barWidth, barHeight);
+}
+
+function drawLives() {
+    if (!isGameStarted) return;
+    const lifeSize = 30;
+    const spacing = 10;
+    const startX = WIDTH - (lifeSize + spacing) * INITIAL_LIVES - 10;
+    const startY = 10;
+    for (let i = 0; i < INITIAL_LIVES; i++) {
+        const x = startX + (lifeSize + spacing) * i;
+        if (i < currentLives) {
+            ctx.drawImage(playerImg, x, startY, lifeSize, lifeSize);
+        } else {
+            ctx.filter = 'grayscale(100%)';
+            ctx.drawImage(playerImg, x, startY, lifeSize, lifeSize);
+            ctx.filter = 'none';
+        }
+    }
+}
+
+function drawScore() {
+    if (!isGameStarted) return;
+    ctx.fillStyle = '#fff';
+    ctx.font = '24px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${score}`, WIDTH / 2, 30); // 只显示数字，居中在顶部中间
+}
+
+// ====================== 主循环 ======================
+function gameLoop(timestamp) {
+    const delta = timestamp - lastTime;
+    if (delta > FRAME_INTERVAL) {
+        // 更新逻辑
+        updatePlayer();
+        updateRocks();
+        updateBullets();
+        updateExplosions();
+        updateProps();
+        checkBulletRockCollision();
+        checkRockPlayerCollision();
+        checkPlayerPropCollision();
+        
+        // 绘制逻辑
+        drawBackground();
+        drawRocks();
+        drawBullets();
+        drawProps();
+        drawPlayer();
+        drawExplosions();
+        drawHealthBar();  // 左上角：血量条
+        drawLives();      // 右上角：生命条（与得分同一行）
+        drawScore();      // 顶部中间：得分（与生命条同一行）
+        
+        lastTime = timestamp - (delta % FRAME_INTERVAL);
+    }
+    if (!isGameOver) requestAnimationFrame(gameLoop);
+}
+
+// ====================== 游戏启动 ======================
+let loadedImages = 0;
+const totalImages = [
+    backgroundImg, playerImg, ...rockImgs, bulletImg,
+    ...explImgs, ...playerExplImgs, gunImg, shieldImg
+].length;
+
+function onImageLoad() {
+    loadedImages++;
+    if (loadedImages === totalImages) {
+        drawStartPrompt();
+        canvas.addEventListener('click', startGame);
+    }
+}
+
+function drawStartPrompt() {
+    ctx.fillStyle = '#fff';
+    ctx.font = '24px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('点击屏幕开始游戏', WIDTH / 2, HEIGHT / 2);
+}
+
+function startGame() {
+    if (isGameStarted) return;
+    isGameStarted = true;
+    canvas.removeEventListener('click', startGame);
+    backgroundAudio.play().catch(err => {
+        console.error('背景音乐失败:', err);
+        alert('请允许浏览器播放音频，刷新页面重试！');
+    });
+    initRocks();
+    requestAnimationFrame(gameLoop);
+}
+
+// ====================== 事件监听 ======================
+document.addEventListener('keydown', e => {
+    if (e.code in keys) {
+        keys[e.code] = true;
+        if (e.code === 'Space') shootBullet(); // 空格发射子弹
+    }
+});
+
+document.addEventListener('keyup', e => {
+    if (e.code in keys) keys[e.code] = false;
+});
+
+// ====================== 加载资源 ======================
+[
+    backgroundImg, playerImg, ...rockImgs, bulletImg,
+    ...explImgs, ...playerExplImgs, gunImg, shieldImg
+].forEach(img => {
+    img.onload = onImageLoad;
+    img.onerror = () => alert(`图片加载失败: ${img.src}`);
+});
+</script>
+</body>
+</html>
